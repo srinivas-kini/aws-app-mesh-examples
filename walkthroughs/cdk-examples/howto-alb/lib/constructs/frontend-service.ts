@@ -1,12 +1,15 @@
 import * as ecs from "aws-cdk-lib/aws-ecs";
 import * as ec2 from "aws-cdk-lib/aws-ec2"
 import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
-import { Duration } from "aws-cdk-lib";
+import { aws_ecr_assets, Duration } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import { MeshStack } from "../stacks/mesh-components";
+import { EnvoyContainerOptionsConstruct } from "./envoy-container";
+import { XrayContainerOptionsConstruct } from "./xray-container";
+import { ColorAppOptionsConstruct } from "./app-container";
 
 export class FrontEndServiceConstruct extends Construct {
-  
+
   taskDefinition: ecs.FargateTaskDefinition;
   service: ecs.FargateService;
   taskSecGroup: ec2.SecurityGroup;
@@ -46,69 +49,39 @@ export class FrontEndServiceConstruct extends Construct {
     );
 
     // Add the Envoy Image to the task def.
+    const envoyContainerDefinitionOptions = new EnvoyContainerOptionsConstruct(
+      ms.sd.base,
+      "FrontEnvoy",
+      {
+        logStreamPrefix: "front-envoy",
+        appMeshResourceARN: `mesh/${ms.mesh.meshName}/virtualNode/${ms.frontendVirtualNode.virtualNodeName}`,
+      }
+    ).containerDefinitionOptions;
+
     const envoyContainer = this.taskDefinition.addContainer(
       `${this.constructIdentifier}_EnvoyContainer`,
-      {
-        image: ms.sd.base.envoyImage,
-        containerName: "envoy",
-        logging: ecs.LogDriver.awsLogs({
-          logGroup: ms.sd.base.logGroup,
-          streamPrefix: "front-envoy",
-        }),
-        environment: {
-          ENVOY_LOG_LEVEL: "debug",
-          ENABLE_ENVOY_XRAY_TRACING: "1",
-          ENABLE_ENVOY_STATS_TAGS: "1",
-          APPMESH_VIRTUAL_NODE_NAME: `mesh/${ms.mesh.meshName}/virtualNode/${ms.frontendVirtualNode.virtualNodeName}`,
-        },
-        user: "1337",
-        healthCheck: {
-          retries: 10,
-          interval: Duration.seconds(5),
-          timeout: Duration.seconds(10),
-          command: [
-            "CMD-SHELL",
-            "curl -s http://localhost:9901/server_info | grep state | grep -q LIVE",
-          ],
-        },
-      }
+      envoyContainerDefinitionOptions
     );
-    envoyContainer.addPortMappings({
-      containerPort: 9901,
-      protocol: ecs.Protocol.TCP,
-    });
-    envoyContainer.addPortMappings({
-      containerPort: 15000,
-      protocol: ecs.Protocol.TCP,
-    });
-    envoyContainer.addPortMappings({
-      containerPort: 15001,
-      protocol: ecs.Protocol.TCP,
-    });
     envoyContainer.addUlimits({
       name: ecs.UlimitName.NOFILE,
       hardLimit: 15000,
       softLimit: 15000,
     });
 
-    // Add the Xray Image to the task def.
+    // Add the Xray Image to the task def.enecccdenlgbehnubvnevijbtgdbekllnvlrttgvjbnj
+
+    const xrayContainerDefinitionOpts = new XrayContainerOptionsConstruct(
+      ms.sd.base,
+      "FrontXray",
+      {
+        logStreamPrefix: "front-xray",
+      }
+    ).containerDefinitionOptions;
+
     const xrayContainer = this.taskDefinition.addContainer(
       `${this.constructIdentifier}_XrayContainer`,
-      {
-        image: ms.sd.base.xrayDaemonImage,
-        containerName: "xray",
-        logging: ecs.LogDriver.awsLogs({
-          logGroup: ms.sd.base.logGroup,
-          streamPrefix: "front-xray",
-        }),
-        user: "1337",
-      }
+      xrayContainerDefinitionOpts
     );
-
-    xrayContainer.addPortMappings({
-      containerPort: 2000,
-      protocol: ecs.Protocol.UDP,
-    });
 
     envoyContainer.addContainerDependencies({
       container: xrayContainer,
@@ -116,23 +89,21 @@ export class FrontEndServiceConstruct extends Construct {
     });
 
     // Add the Frontend Image to the task def.
-    const appContainer = this.taskDefinition.addContainer(`${this.constructIdentifier}_FrontendAppContainer`, {
-      containerName: "app",
-      image: ecs.ContainerImage.fromDockerImageAsset(ms.sd.base.frontendAppImageAsset),
-      logging: ecs.LogDriver.awsLogs({
-        logGroup: ms.sd.base.logGroup,
-        streamPrefix: "front-app",
-      }),
-      environment: {
-        PORT: ms.sd.base.containerPort.toString(),
-        COLOR_HOST: `${ms.backendVirtualService.virtualServiceName}:${ms.sd.base.containerPort}`,
-        XRAY_APP_NAME: `${ms.mesh.meshName}/${ms.frontendVirtualNode.virtualNodeName}`,
-      },
-    });
-    appContainer.addPortMappings({
-      containerPort: ms.sd.base.containerPort,
-      protocol: ecs.Protocol.TCP,
-    });
+    const appContainerOptions = new ColorAppOptionsConstruct(ms, "FrontApp", {
+      color: "green",
+      xrayAppName: `${ms.mesh.meshName}/${ms.backendV2VirtualNode.virtualNodeName}`,
+      logStreamPrefix: "front-app",
+      image: new aws_ecr_assets.DockerImageAsset(this, `FrontAppImageAsset`, {
+        directory: ".././howto-alb/feapp",
+        platform: aws_ecr_assets.Platform.LINUX_AMD64,
+      })
+    }).containerDefinitionOptions;
+
+    const appContainer = this.taskDefinition.addContainer(
+      `${this.constructIdentifier}_ColorAppContainer`,
+      appContainerOptions
+    );
+
     appContainer.addContainerDependencies({
       container: xrayContainer,
       condition: ecs.ContainerDependencyCondition.START,
